@@ -34,6 +34,7 @@ pub const MIGRATIONS: &[(u32, &str, &str)] = &[
     (21, "skills", include_str!("../migrations/tenant/0021_skills.surql")),
     (22, "connector_kind_ed", include_str!("../migrations/tenant/0022_connector_kind_ed.surql")),
     (23, "sync_check_connectivity", include_str!("../migrations/tenant/0023_sync_check_connectivity.surql")),
+    (24, "owner_name", include_str!("../migrations/tenant/0024_owner_name.surql")),
 ];
 
 /// The tenant schema version this code writes. An org database is current at this version.

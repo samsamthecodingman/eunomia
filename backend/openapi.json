@@ -7546,6 +7546,7 @@
         "required": [
           "embedding_model",
           "chat_model",
+          "owner_name",
           "sync_intervals",
           "sync_check_connectivity",
           "theme",
@@ -7580,6 +7581,9 @@
             "type": "boolean"
           },
           "openai_base_url": {
+            "type": "string"
+          },
+          "owner_name": {
             "type": "string"
           },
           "sync_check_connectivity": {
@@ -7636,6 +7640,13 @@
               "string",
               "null"
             ]
+          },
+          "owner_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's own name, used by email extraction so facts about the mailbox owner have a subject (\"\" = unknown)"
           },
           "sync_check_connectivity": {
             "type": [
