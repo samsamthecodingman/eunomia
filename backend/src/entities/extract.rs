@@ -204,7 +204,7 @@ fn build_ed_prompt(unit: Option<&str>, date: Option<&str>, category: &str, title
         "You extract lasting facts about the unit {unit} from one thread of its Ed discussion forum. Return strict JSON, no prose, \
 with this exact shape:\n\n\
 {{\n  \"people\": [{{\"name\": str, \"aliases\": [str], \"facts\": [str]}}],\n  \"organisations\": [{{\"name\": str, \"aliases\": [str], \"facts\": [str]}}],\n  \"locations\": [{{\"name\": str, \"aliases\": [str], \"facts\": [str]}}],\n  \"relations\": [{{\"from\": str, \"from_kind\": \"person|organisation|location\", \"to\": str, \"to_kind\": \"person|organisation|location\", \"label\": str}}]\n}}\n\n\
-Thread date: {date_line}\nCategory: {category}\nTitle: {title}\n\n\
+Thread last active: {date_line} (the latest reply, not when the thread was posted)\nCategory: {category}\nTitle: {title}\n\n\
 Put every fact under one organisation entry named \"{unit}\". Return NOTHING (empty arrays) for most threads; that is correct and expected. \
 At most {MAX_ED_FACTS} facts per thread, usually 0 or 1.\n\n\
 SAVE only lasting facts about the unit:\n\
@@ -220,7 +220,7 @@ NEVER SAVE:\n\
 - questions nobody answered\n\
 - anything only a student said that staff did not confirm\n\n\
 Refer to teaching staff by role (\"the lecturer\", \"a tutor\"), never by name, and never name a student. Do not return people or relations. \
-Each fact is one self-contained sentence that names the unit. Time-sensitive facts start with \"On {date_line},\" or give the absolute date.\n\n\
+Each fact is one self-contained sentence that names the unit. Give a date only when the thread states one (a deadline, a test week, an announcement dated in the text); never date a fact by when the thread was last active.\n\n\
 Thread:\n{text}\n"
     )
 }
@@ -623,7 +623,7 @@ mod tests {
         rec.source = "gmail".into();
         assert!(!is_ed(&rec));
         let p = build_ed_prompt(Some("FIT9999"), Some("2026-05-01"), "Exams", "Final", "Is it open book?");
-        assert!(p.contains("FIT9999") && p.contains("Thread date: 2026-05-01") && p.contains("Category: Exams"));
+        assert!(p.contains("FIT9999") && p.contains("Thread last active: 2026-05-01") && p.contains("Category: Exams"));
         assert!(p.contains("At most 5 facts") && p.contains("NEVER SAVE") && p.contains("never name a student"));
         assert!(p.contains("\"people\"") && p.ends_with("Is it open book?\n"));
         assert!(build_ed_prompt(None, None, "", "t", "x").contains("the unit"));
