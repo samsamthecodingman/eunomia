@@ -198,6 +198,32 @@ pub const REEXTRACT_CLEAR: Stmt = Stmt::at(
     11, // BEGIN 0, six LETs 1 to 6, four writes 7 to 10, RETURN 11
 );
 
+/// Removes the facts and relations a record's earlier extraction wrote (`$record` is the cache record's
+/// id), so extracting it again leaves the same end state as extracting it once. Facts are the record's
+/// own memories that are not observations (hand-written memories carry no source, or another one).
+/// Affected subjects' observations are handled like [`REEXTRACT_CLEAR`] does: deleted when they rest
+/// only on those facts, else stale with those facts dropped from their lineage. Returns the subjects
+/// that lost facts, so their consolidation can be queued.
+pub const EXTRACT_CLEAR_RECORD: Stmt = Stmt::at(
+    "cache.extract_clear_record",
+    r#"BEGIN TRANSACTION;
+        LET $mems = (SELECT id, subject FROM memory WHERE source = $record AND type != "observation");
+        LET $ids = $mems.id;
+        LET $subjects = array::distinct($mems.subject);
+        LET $rels = (SELECT VALUE id FROM relates_to WHERE source = $record);
+        LET $obs = (SELECT VALUE id FROM memory WHERE type = "observation" AND subject IN $subjects
+            AND array::len(source_memories ?? []) > 0 AND array::len(array::complement(source_memories ?? [], $ids)) = 0);
+        DELETE $ids;
+        DELETE $obs;
+        UPDATE memory SET status = "stale", updated_at = time::now(),
+            source_memories = IF source_memories THEN array::complement(source_memories, $ids) ELSE NONE END
+            WHERE type = "observation" AND subject IN $subjects;
+        DELETE $rels;
+        RETURN $subjects;
+        COMMIT TRANSACTION;"#,
+    10, // BEGIN 0, five LETs 1 to 5, four writes 6 to 9, RETURN 10
+);
+
 /// Earlier Gmail records from the 90 days before `$at` (oldest first) whose sender contains `$addr`, for
 /// the repeated-reminder check. Bounded: the caller compares sender and subject exactly and applies
 /// the 14-day rule from the first copy.
@@ -212,6 +238,7 @@ pub const REPEAT_CANDIDATES: Stmt = Stmt::new(
 pub const ALL: &[&Stmt] = &[
     &REEXTRACT_COUNTS,
     &REEXTRACT_CLEAR,
+    &EXTRACT_CLEAR_RECORD,
     &REPEAT_CANDIDATES,
     &DELETE_SOURCE_DATA,
     &MEMORY_FOR_EMBED,

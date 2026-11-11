@@ -11,7 +11,7 @@
 //!   (provider outage) is re-embedded the next time the same unchanged record is replayed, and the
 //!   `embed` job reconciler finds it too.
 //! - Entity extraction and consolidation run as background jobs (`jobs::handlers`): this pipeline
-//!   only enqueues an `extract` job per new or changed record; the handler does nothing when the
+//!   only enqueues an `extract` job per new record or one whose title or body changed; the handler does nothing when the
 //!   owner has no chat model, so with no model raw records are stored and nothing calls out.
 
 use serde::Serialize;
@@ -99,7 +99,7 @@ pub async fn ingest(
             if env.source.is_empty() {
                 env.source = source_key.to_string();
             }
-            let (rec, changed) = match search::upsert(db, owner, &env).await {
+            let (rec, changed, text_changed) = match search::upsert(db, owner, &env).await {
                 Ok(r) => r,
                 Err(e) => {
                     report.failed += 1;
@@ -123,7 +123,8 @@ pub async fn ingest(
             {
                 report.errors.push(format!("embed {}: {}", rec.id, e.message));
             }
-            if changed {
+            // metadata alone (a bumped `updated_at`, reply counts) leaves nothing new to extract
+            if text_changed {
                 crate::jobs::handlers::enqueue_extract(state, owner, &rec.id, &rec.content_hash).await;
             }
         }

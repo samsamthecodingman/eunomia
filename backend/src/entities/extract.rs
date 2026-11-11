@@ -189,6 +189,75 @@ fn cap_email(data: &mut ExtractionData) {
     }
 }
 
+/// Facts kept per Ed thread, across the whole thread. A thread is a whole conversation, so it gets more
+/// room than Gmail's per-email cap of 3 ([`super::email::MAX_EMAIL_FACTS`]). The cap is what bounds the
+/// total: 492 threads x 5 = at most ~2,460 facts, within the 2,000-3,000 target (most threads give 0 or 1).
+const MAX_ED_FACTS: usize = 5;
+
+/// The prompt for one Ed forum thread. Same JSON shape as [`build_prompt`], but only lasting facts about
+/// the unit are wanted: most threads yield nothing. `unit` is the course code (or name), when known.
+fn build_ed_prompt(unit: Option<&str>, date: Option<&str>, category: &str, title: &str, text: &str) -> String {
+    let unit = unit.map(str::trim).filter(|u| !u.is_empty()).unwrap_or("the unit");
+    let date_line = date.unwrap_or("unknown");
+    let category = if category.trim().is_empty() { "none" } else { category.trim() };
+    format!(
+        "You extract lasting facts about the unit {unit} from one thread of its Ed discussion forum. Return strict JSON, no prose, \
+with this exact shape:\n\n\
+{{\n  \"people\": [{{\"name\": str, \"aliases\": [str], \"facts\": [str]}}],\n  \"organisations\": [{{\"name\": str, \"aliases\": [str], \"facts\": [str]}}],\n  \"locations\": [{{\"name\": str, \"aliases\": [str], \"facts\": [str]}}],\n  \"relations\": [{{\"from\": str, \"from_kind\": \"person|organisation|location\", \"to\": str, \"to_kind\": \"person|organisation|location\", \"label\": str}}]\n}}\n\n\
+Thread date: {date_line}\nCategory: {category}\nTitle: {title}\n\n\
+Put every fact under one organisation entry named \"{unit}\". Return NOTHING (empty arrays) for most threads; that is correct and expected. \
+At most {MAX_ED_FACTS} facts per thread, usually 0 or 1.\n\n\
+SAVE only lasting facts about the unit:\n\
+- decisions or clarifications by teaching staff\n\
+- assessment and exam rules (format, weighting, allowed materials, extensions, late penalties)\n\
+- deadlines and dates\n\
+- corrections to an earlier announcement\n\
+- where to find something official (a page, a file, a form)\n\n\
+NEVER SAVE:\n\
+- thanks, greetings, who asked or answered what\n\
+- a student not being able to see their grade or reaching a page\n\
+- students' guesses, opinions, +1s or \"me too\"\n\
+- questions nobody answered\n\
+- anything only a student said that staff did not confirm\n\n\
+Refer to teaching staff by role (\"the lecturer\", \"a tutor\"), never by name, and never name a student. Do not return people or relations. \
+Each fact is one self-contained sentence that names the unit. Time-sensitive facts start with \"On {date_line},\" or give the absolute date.\n\n\
+Thread:\n{text}\n"
+    )
+}
+
+/// Whether a record is an Ed thread, and so gets the Ed prompt and the Ed caps.
+fn is_ed(record: &ExtractRecord) -> bool {
+    record.source == "ed"
+}
+
+/// Applies the Ed rules in code: every kept fact goes to one organisation entity, the unit (named by
+/// `course_code`, else `course`, else the model's first organisation); people and relations are dropped
+/// (stored bodies do not say who is staff, so a person subject would mostly be a student who posted);
+/// empty facts are dropped and at most [`MAX_ED_FACTS`] are kept.
+fn cap_ed(data: &mut ExtractionData, payload: &Value) {
+    let field = |k: &str| payload.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let (code, course) = (field("course_code"), field("course"));
+    let facts: Vec<String> = data
+        .organisations
+        .iter()
+        .chain(&data.locations)
+        .flat_map(|e| e.facts.iter())
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .take(MAX_ED_FACTS)
+        .collect();
+    let fallback = data.organisations.iter().find_map(|e| e.name.as_deref().map(str::trim).filter(|n| !n.is_empty() && !is_placeholder(n)));
+    let unit = code.or(course).or(fallback).map(str::to_string);
+    let aliases = course.filter(|c| Some(*c) != code).map(|c| vec![c.to_string()]).unwrap_or_default();
+    data.people.clear();
+    data.locations.clear();
+    data.relations.clear();
+    data.organisations = match unit {
+        Some(name) if !facts.is_empty() => vec![EntityExtract { name: Some(name), aliases, facts }],
+        _ => Vec::new(),
+    };
+}
+
 /// A speaker label rather than a name ("Unknown", "Speaker 2", "SPEAKER_01").
 fn is_placeholder(name: &str) -> bool {
     let n = name.trim().to_lowercase().replace('_', " ");
@@ -339,8 +408,8 @@ async fn apply_extraction(
 /// new raw memory (empty on no-op/failure) -- a future ingest pipeline would
 /// use this to batch-trigger `consolidate.rs` per unique subject touched.
 ///
-/// Failures are logged. For email they are also returned, so the job retries (a re-extract has already
-/// deleted the old facts); for other sources a failed model call just yields nothing.
+/// Failures are logged. For email and Ed they are also returned, so the job retries; for other sources a
+/// failed model call just yields nothing. A failed call leaves the record's old facts in place.
 pub async fn extract_entities(
     db: &OrgDb,
     settings: &Settings,
@@ -348,6 +417,7 @@ pub async fn extract_entities(
     record: &ExtractRecord,
 ) -> Result<HashSet<String>, AppError> {
     let email = is_email(record);
+    let ed = is_ed(record);
     let cleaned;
     let body = if email {
         cleaned = super::email::strip_quoted(record.body_text.trim());
@@ -365,27 +435,57 @@ pub async fn extract_entities(
     let date = record.occurred_at.as_deref().map(|d| d.get(..10).unwrap_or(d));
     let prompt = if email {
         build_email_prompt(record.owner_name.as_deref(), date, &super::email::labels_of(&record.payload), title, body)
+    } else if ed {
+        let field = |k: &str| record.payload.get(k).and_then(Value::as_str).unwrap_or("");
+        let unit = Some(field("course_code")).filter(|c| !c.trim().is_empty()).or(Some(field("course")));
+        build_ed_prompt(unit, date, field("category"), title, body)
     } else {
         build_prompt(&text, date)
     };
+    // email and Ed failures are returned, so the job retries; other sources just yield nothing
+    let strict = email || ed;
     let mut data = match call_llm(db, settings, owner, prompt).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("entity extraction LLM call failed for {}: {}", record.id, e.message);
-            return if email { Err(e) } else { Ok(HashSet::new()) };
+            return if strict { Err(e) } else { Ok(HashSet::new()) };
         }
     };
     if email {
         cap_email(&mut data);
+    } else if ed {
+        cap_ed(&mut data, &record.payload);
     }
 
+    // only now, with a parsed answer in hand, are the record's earlier facts replaced: extracting the
+    // same record again leaves the same facts as extracting it once
+    let mut touched = match clear_record(db, owner, &record.id).await {
+        Ok(subjects) => subjects,
+        Err(e) => {
+            tracing::warn!("entity extraction could not clear old facts for {}: {}", record.id, e.message);
+            return if strict { Err(e) } else { Ok(HashSet::new()) };
+        }
+    };
     match apply_extraction(db, owner, &record.id, record.vault.as_ref(), &data).await {
-        Ok(touched) => Ok(touched),
+        Ok(new) => {
+            touched.extend(new);
+            Ok(touched)
+        }
         Err(e) => {
             tracing::warn!("entity extraction upsert failed for {}: {}", record.id, e.message);
-            if email { Err(e) } else { Ok(HashSet::new()) }
+            if strict { Err(e) } else { Ok(HashSet::new()) }
         }
     }
+}
+
+/// Deletes the facts and relations an earlier extraction of this record wrote ([`store::cache::EXTRACT_CLEAR_RECORD`])
+/// and returns the subjects that lost facts (as strings), so their consolidation is queued again.
+async fn clear_record(db: &OrgDb, owner: &RecordId, record_id: &str) -> AppResult<HashSet<String>> {
+    let record = service::cache_record_rid(owner, record_id);
+    let stmt = &store::cache::EXTRACT_CLEAR_RECORD;
+    let mut res = crate::tx::with_retry(|| async { stmt.on(db).bind(("record", record.clone())).await }).await?;
+    let subjects: Vec<RecordId> = res.take(stmt.slot)?;
+    Ok(subjects.iter().map(|s| s.to_string()).collect())
 }
 
 #[cfg(test)]
@@ -514,6 +614,50 @@ mod tests {
         let names = |v: &[EntityExtract]| v.iter().filter_map(|e| e.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&data.people), vec!["Sam", "Ada"]);
         assert_eq!(names(&data.organisations), vec!["Acme"]);
+    }
+
+    #[test]
+    fn only_ed_records_use_the_ed_prompt_and_it_carries_the_rules() {
+        let mut rec = email_record("ed");
+        assert!(is_ed(&rec));
+        rec.source = "gmail".into();
+        assert!(!is_ed(&rec));
+        let p = build_ed_prompt(Some("FIT9999"), Some("2026-05-01"), "Exams", "Final", "Is it open book?");
+        assert!(p.contains("FIT9999") && p.contains("Thread date: 2026-05-01") && p.contains("Category: Exams"));
+        assert!(p.contains("At most 5 facts") && p.contains("NEVER SAVE") && p.contains("never name a student"));
+        assert!(p.contains("\"people\"") && p.ends_with("Is it open book?\n"));
+        assert!(build_ed_prompt(None, None, "", "t", "x").contains("the unit"));
+    }
+
+    #[test]
+    fn cap_ed_puts_five_facts_on_the_unit_and_drops_people_and_relations() {
+        let ent = |n: &str, f: &[&str]| EntityExtract { name: Some(n.into()), facts: f.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let mut data = ExtractionData {
+            people: vec![ent("Student A", &["guessed"])],
+            organisations: vec![ent("Dept", &["a", " ", "b", "c"]), ent("Other", &["d", "e", "f"])],
+            locations: vec![],
+            relations: vec![RelationExtract::default()],
+        };
+        cap_ed(&mut data, &json!({"course_code": "FIT9999", "course": "Intro to Testing"}));
+        assert!(data.people.is_empty() && data.relations.is_empty());
+        assert_eq!(data.organisations.len(), 1);
+        assert_eq!(data.organisations[0].name.as_deref(), Some("FIT9999"));
+        assert_eq!(data.organisations[0].aliases, vec!["Intro to Testing"]);
+        assert_eq!(data.organisations[0].facts, vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn cap_ed_falls_back_to_course_then_the_models_organisation_and_keeps_nothing_without_facts() {
+        let ent = |n: &str, f: &[&str]| EntityExtract { name: Some(n.into()), facts: f.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let mut by_course = ExtractionData { organisations: vec![ent("Dept", &["a"])], ..Default::default() };
+        cap_ed(&mut by_course, &json!({"course_code": "", "course": "Intro"}));
+        assert_eq!(by_course.organisations[0].name.as_deref(), Some("Intro"));
+        let mut by_model = ExtractionData { organisations: vec![ent("Unknown", &[]), ent("Dept", &["a"])], ..Default::default() };
+        cap_ed(&mut by_model, &Value::Null);
+        assert_eq!(by_model.organisations[0].name.as_deref(), Some("Dept"));
+        let mut none = ExtractionData { organisations: vec![ent("Dept", &[" "])], ..Default::default() };
+        cap_ed(&mut none, &json!({"course_code": "FIT9999"}));
+        assert!(none.organisations.is_empty());
     }
 
     #[test]

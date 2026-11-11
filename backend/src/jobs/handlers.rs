@@ -148,7 +148,7 @@ async fn extract_record(state: AppState, job: Job) -> Result<(), JobError> {
         payload: rec.payload,
         owner_name: Some(owner_name).filter(|n| !n.trim().is_empty()),
     };
-    // a failed model call must retry: a re-extract has already deleted the facts this would recreate
+    // a failed email or Ed model call must retry; the record's old facts stay until a call succeeds
     for subject in extract::extract_entities(db, &state.settings, &job.owner, &record).await? {
         if let Ok(subject) = crate::rid::parse(&subject) {
             super::enqueue_lossy(&state.control, super::leader::consolidate_job(state.db.org(), &job.owner, &subject)).await;

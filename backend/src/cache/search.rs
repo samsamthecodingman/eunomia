@@ -347,14 +347,18 @@ fn place(owner: &RecordId, existing: Option<&Row>, placement: Option<&Placement>
 }
 
 /// Insert or update one envelope, scoped to `owner`. Returns `(record,
-/// changed)`; `changed` is about the record's content only (it drives embedding and extraction), so a
-/// replay that changes only `links` reconciles them and still reports unchanged.
-pub async fn upsert(db: &OrgDb, owner: &RecordId, env: &Envelope) -> AppResult<(CacheRecord, bool)> {
+/// changed, text_changed)`; `changed` is about the record's content only (it drives embedding), so a
+/// replay that changes only `links` reconciles them and still reports unchanged. `text_changed` is
+/// whether what extraction reads (`title`, `body_text`) is new: the record is new, its text differs, or
+/// it was deleted and is live again. A change to metadata alone (`occurred_at`, payload counts) is
+/// `changed` but not `text_changed`, and does not need extracting again.
+pub async fn upsert(db: &OrgDb, owner: &RecordId, env: &Envelope) -> AppResult<(CacheRecord, bool, bool)> {
     let record_rid = rid(owner, &env.id);
     let h = hash_envelope(env);
 
     let existing: Option<Row> = store::get(db, &record_rid).await?;
     let (vault, route_keys) = place(owner, existing.as_ref(), env.placement.as_ref());
+    let text_changed = existing.as_ref().is_none_or(|e| e.title != env.title || e.body_text != env.body_text || (e.deleted && !env.deleted));
     if let Some(existing) = existing
         && existing.content_hash == h && !existing.deleted {
             store::cache::TOUCH_INGESTED
@@ -370,7 +374,7 @@ pub async fn upsert(db: &OrgDb, owner: &RecordId, env: &Envelope) -> AppResult<(
             let mut rec = row_to_record(existing, owner);
             rec.ingested_at = Some(Datetime::from(chrono::Utc::now()));
             rec.vault = vault;
-            return Ok((rec, false));
+            return Ok((rec, false, false));
         }
 
     // Concurrent writers (other syncs, other users) can conflict on the shared indexes; the loser is
@@ -405,7 +409,7 @@ pub async fn upsert(db: &OrgDb, owner: &RecordId, env: &Envelope) -> AppResult<(
     let rec = row_to_record(row, owner);
 
     reconcile_links(db, owner, &record_rid, &env.links).await?;
-    Ok((rec, true))
+    Ok((rec, true, text_changed))
 }
 
 pub async fn set_embedding(db: &OrgDb, owner: &RecordId, record_id: &str, vector: Vec<f32>) -> AppResult<()> {

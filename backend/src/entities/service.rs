@@ -91,7 +91,7 @@ fn owner_key_string(owner: &RecordId) -> String {
 
 /// The internal `cache_record` RecordId for a record's caller-facing id --
 /// (the owner-id prefix is internal).
-fn cache_record_rid(owner: &RecordId, record_id: &str) -> RecordId {
+pub(super) fn cache_record_rid(owner: &RecordId, record_id: &str) -> RecordId {
     RecordId::from_table_key("cache_record", format!("{}:{}", owner_key_string(owner), record_id))
 }
 
