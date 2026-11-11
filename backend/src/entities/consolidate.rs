@@ -50,6 +50,12 @@ use super::extract::app_settings_row;
 pub const DEFAULT_MISSION: &str = "Observations are stable facts about people and relationships: preferences, skills, roles, \
 recurring patterns, and how they change over time. Ignore ephemeral or one-off details.";
 
+/// Most raw facts one consolidation reads and puts in the prompt (the newest). 200 is plenty for a belief
+/// statement (older facts are already folded into the existing observation) and keeps the prompt to
+/// a sane size. The lineage names only these facts, so an entity with more never re-consolidates just
+/// because older facts fell out of the window.
+pub const MAX_CONSOLIDATE_FACTS: i64 = 200;
+
 #[derive(Debug, Deserialize, SurrealValue)]
 struct SubjectRow {
     vault: RecordId,
@@ -205,8 +211,10 @@ pub async fn consolidate_subject(
     let mut raw_res = q::RAW_MEMORIES
         .on(db)
         .bind(("id", subject_id.clone()))
+        .bind(("limit", MAX_CONSOLIDATE_FACTS))
         .await?;
-    let raw_rows: Vec<RawMemoryRow> = raw_res.take(0)?;
+    let mut raw_rows: Vec<RawMemoryRow> = raw_res.take(0)?;
+    raw_rows.reverse(); // newest first from the query; the prompt lists oldest first
 
     let mut existing_res = q::OBSERVATION_OF
         .on(db)

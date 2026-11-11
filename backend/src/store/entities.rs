@@ -212,13 +212,16 @@ pub const MARK_SUPERSEDED: Stmt = Stmt::new(
     r#"UPDATE $ids SET status = "superseded";
        UPDATE memory SET status = "stale" WHERE subject = $subject AND type = "observation";"#,
 );
+/// The newest `$limit` live raw facts of a subject, newest first. Only the columns consolidation reads: a
+/// `SELECT *` would drag every fact's 1536-float embedding into memory, for thousands of facts at once.
 pub const RAW_MEMORIES: Stmt = Stmt::new(
     "entities.raw_memories",
-    r#"SELECT * FROM memory WHERE subject = $id AND type IN ["world","experience"] AND status != "superseded" ORDER BY created_at"#,
+    r#"SELECT id, text, created_at FROM memory WHERE subject = $id AND type IN ["world","experience"] AND status != "superseded" ORDER BY created_at DESC, id DESC LIMIT $limit"#,
 );
+/// The subject's observation, without its embedding: just the columns `consolidate` reads.
 pub const OBSERVATION_OF: Stmt = Stmt::new(
     "entities.observation_of",
-    r#"SELECT * FROM memory WHERE subject = $id AND type = "observation" LIMIT 1"#,
+    r#"SELECT id, text, source_memories, version, status FROM memory WHERE subject = $id AND type = "observation" LIMIT 1"#,
 );
 pub const CONSOLIDATE_CREATE: Stmt = Stmt::at(
     "entities.consolidate_create",
@@ -386,4 +389,16 @@ pub fn search_entities<'a>(db: &'a OrgDb, kinds: &[&str], by_kind: bool, with_fa
             rows.join(", ")
         ),
     )
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+
+    #[test]
+    fn consolidation_reads_are_bounded_and_skip_the_embedding() {
+        assert!(RAW_MEMORIES.sql.contains("LIMIT $limit"));
+        assert!(!RAW_MEMORIES.sql.contains("SELECT *"));
+        assert!(!OBSERVATION_OF.sql.contains("SELECT *"));
+    }
 }

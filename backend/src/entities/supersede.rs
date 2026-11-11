@@ -21,6 +21,8 @@ use crate::store::entities as q;
 
 /// Most facts one check sends to the model (the new ones plus their nearest live facts).
 const MAX_FACTS: usize = 40;
+/// Most new facts one check handles (the newest): each costs an embedding and a similarity scan.
+const MAX_NEW: usize = MAX_FACTS / 2;
 /// Live facts compared with each new fact, nearest first.
 const NEIGHBOURS: usize = 8;
 /// Cosine similarity an older fact needs with a new one to be a candidate at all. Below it the two
@@ -107,8 +109,10 @@ async fn call_llm(db: &OrgDb, settings: &Settings, owner: &RecordId, prompt: Str
 
 /// Compares `subject`'s `new` facts with its other live facts, marks the ones
 /// a later fact supersedes, and (if any) makes the subject's observation
-/// stale. Returns the ids marked. No-op without a chat model.
+/// stale. Returns the ids marked. No-op without a chat model. `new` is oldest first; only its last
+/// `MAX_NEW` are checked, the rest are left unchecked.
 pub async fn check(db: &OrgDb, settings: &Settings, owner: &RecordId, subject: &RecordId, new: &[RecordId]) -> Vec<RecordId> {
+    let new = &new[new.len().saturating_sub(MAX_NEW)..];
     if new.is_empty() || !enabled(db, settings, owner).await {
         return Vec::new();
     }
